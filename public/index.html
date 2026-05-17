@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ark Video Studio</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">火山方舟视频生成</p>
+          <h1>Ark Video Studio</h1>
+        </div>
+        <div class="topbar-actions">
+          <span id="api-status" class="status-pill">检查 API Key...</span>
+          <button id="refresh-models" class="icon-button" title="刷新模型列表" aria-label="刷新模型列表">↻</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="composer-panel" aria-label="视频生成工作台">
+          <div class="model-row">
+            <label class="field span-2">
+              <span>模型</span>
+              <select id="model-select"></select>
+            </label>
+            <label class="field">
+              <span>服务等级</span>
+              <select id="service-tier">
+                <option value="default">default 在线</option>
+                <option value="flex">flex 离线</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="prompt-block">
+            <div class="prompt-head">
+              <div>
+                <h2>Prompt</h2>
+                <p>点击素材标签可插入 @图片1 / @视频1。</p>
+              </div>
+              <button id="insert-template" type="button" class="small-button">模板</button>
+            </div>
+            <textarea id="prompt" spellcheck="false" placeholder="例：@图片1 中的主体在雨夜霓虹街头慢慢回头，镜头低角度推进，电影感，高细节，环境声自然。"></textarea>
+            <div id="reference-tokens" class="token-row"></div>
+          </div>
+
+          <div class="reference-tools">
+            <div class="section-head">
+              <div>
+                <h2>参考素材</h2>
+                <p>图片支持本地上传、URL、asset://；本地视频会自动上传 TOS，未配置 TOS 时需填写公网 URL。</p>
+              </div>
+            </div>
+
+            <div class="upload-grid">
+              <label class="drop-zone">
+                <input id="file-input" type="file" accept="image/*,video/mp4,video/quicktime" multiple>
+                <span class="drop-title">上传图片 / 视频</span>
+                <span class="drop-copy">图片建议小于 30 MB；视频小于 50 MB，可自动托管到 TOS。</span>
+              </label>
+              <div class="manual-source">
+                <label class="field">
+                  <span>素材地址</span>
+                  <input id="source-url" placeholder="图片可用 asset://；视频需 https://...">
+                </label>
+                <div class="manual-row">
+                  <select id="source-kind">
+                    <option value="image">图片</option>
+                    <option value="video">视频</option>
+                  </select>
+                  <button id="add-source" type="button">添加素材</button>
+                </div>
+              </div>
+            </div>
+
+            <div id="reference-list" class="reference-list"></div>
+          </div>
+        </section>
+
+        <aside class="settings-panel" aria-label="参数配置">
+          <section>
+            <h2>参数</h2>
+            <div class="settings-grid">
+              <label class="field">
+                <span>分辨率</span>
+                <select id="resolution">
+                  <option value="720p">720p</option>
+                  <option value="480p">480p</option>
+                  <option value="1080p">1080p</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>比例</span>
+                <select id="ratio">
+                  <option value="adaptive">adaptive</option>
+                  <option value="16:9">16:9</option>
+                  <option value="9:16">9:16</option>
+                  <option value="1:1">1:1</option>
+                  <option value="4:3">4:3</option>
+                  <option value="3:4">3:4</option>
+                  <option value="21:9">21:9</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>时长</span>
+                <input id="duration" type="number" min="-1" max="15" value="5">
+              </label>
+              <label class="field">
+                <span>帧数</span>
+                <input id="frames" type="number" min="29" max="289" placeholder="可选">
+              </label>
+              <label class="field">
+                <span>Seed</span>
+                <input id="seed" type="number" min="-1" value="-1">
+              </label>
+              <label class="field">
+                <span>过期秒数</span>
+                <input id="expires" type="number" min="3600" max="259200" value="172800">
+              </label>
+            </div>
+
+            <div class="toggle-stack">
+              <label><input id="generate-audio" type="checkbox" checked> 生成同步声音</label>
+              <label><input id="watermark" type="checkbox"> 添加 AI 水印</label>
+              <label><input id="last-frame" type="checkbox"> 返回尾帧</label>
+              <label><input id="web-search" type="checkbox"> 允许联网搜索工具</label>
+              <label><input id="send-unmentioned" type="checkbox" checked> 发送全部已添加素材</label>
+            </div>
+          </section>
+
+          <section class="compliance-note">
+            <h2>素材规则</h2>
+            <p>Seedance 2.0 系列不支持直接上传含真人人脸的参考图/视频。请使用已授权素材、预置虚拟人像或受信模型产物。</p>
+          </section>
+
+          <section class="cost-panel">
+            <div class="section-head cost-head">
+              <div>
+                <h2>费用</h2>
+                <p>提交前为粗估，完成后按返回 token 估算。</p>
+              </div>
+              <button id="refresh-balance" class="small-button" type="button">余额</button>
+            </div>
+            <div class="cost-grid">
+              <div class="cost-item">
+                <span>可用余额</span>
+                <strong id="balance-value">未查询</strong>
+              </div>
+              <div class="cost-item">
+                <span>本次预估</span>
+                <strong id="estimate-value">--</strong>
+              </div>
+              <div class="cost-item">
+                <span>任务实耗</span>
+                <strong id="actual-cost-value">等待结果</strong>
+              </div>
+            </div>
+            <p id="cost-note" class="cost-note">余额查询需要配置费用中心授权；ARK_API_KEY 不能直接查账务余额。</p>
+          </section>
+
+          <button id="generate" class="generate-button" type="button">生成视频</button>
+          <p id="form-message" class="form-message"></p>
+        </aside>
+
+        <section class="result-panel" aria-label="生成结果">
+          <div class="section-head">
+            <div>
+              <h2>结果</h2>
+              <p id="job-subtitle">等待提交任务。</p>
+            </div>
+            <button id="poll-now" class="small-button" type="button" disabled>刷新状态</button>
+          </div>
+
+          <div class="stage">
+            <video id="result-video" controls playsinline></video>
+            <div id="empty-state" class="empty-state">
+              <strong>还没有视频</strong>
+              <span>提交后会自动轮询任务状态，成功后在这里预览和下载。</span>
+            </div>
+          </div>
+
+          <div id="task-meta" class="task-meta"></div>
+          <div id="download-actions" class="download-actions"></div>
+          <pre id="request-preview" class="request-preview"></pre>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
