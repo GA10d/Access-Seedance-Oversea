@@ -2,6 +2,7 @@ const state = {
   models: [],
   references: [],
   activeTaskId: "",
+  currentStatus: "",
   pollTimer: 0,
   lastRequest: null,
   tos: { configured: false, message: "" }
@@ -9,6 +10,12 @@ const state = {
 
 const els = {
   apiStatus: document.querySelector("#api-status"),
+  historyButton: document.querySelector("#history-button"),
+  historyModal: document.querySelector("#history-modal"),
+  historyClose: document.querySelector("#history-close"),
+  historyList: document.querySelector("#history-list"),
+  historyTaskId: document.querySelector("#history-task-id"),
+  historyImport: document.querySelector("#history-import"),
   refreshModels: document.querySelector("#refresh-models"),
   modelSelect: document.querySelector("#model-select"),
   serviceTier: document.querySelector("#service-tier"),
@@ -40,6 +47,10 @@ const els = {
   formMessage: document.querySelector("#form-message"),
   pollNow: document.querySelector("#poll-now"),
   jobSubtitle: document.querySelector("#job-subtitle"),
+  progressLabel: document.querySelector("#progress-label"),
+  progressValue: document.querySelector("#progress-value"),
+  progressBar: document.querySelector("#progress-bar"),
+  progressNote: document.querySelector("#progress-note"),
   stage: document.querySelector(".stage"),
   resultVideo: document.querySelector("#result-video"),
   taskMeta: document.querySelector("#task-meta"),
@@ -61,7 +72,23 @@ async function init() {
 
 function wireEvents() {
   els.refreshModels.addEventListener("click", loadModels);
-  els.modelSelect.addEventListener("change", updateCostEstimate);
+  els.historyButton.addEventListener("click", openHistory);
+  els.historyClose.addEventListener("click", closeHistory);
+  els.historyModal.addEventListener("click", event => {
+    if (event.target === els.historyModal) {
+      closeHistory();
+    }
+  });
+  els.historyImport.addEventListener("click", importHistoryTask);
+  els.historyTaskId.addEventListener("keydown", event => {
+    if (event.key === "Enter") {
+      importHistoryTask();
+    }
+  });
+  els.modelSelect.addEventListener("change", () => {
+    updateCostEstimate();
+    updateScenarioHint();
+  });
   els.duration.addEventListener("input", updateCostEstimate);
   els.frames.addEventListener("input", updateCostEstimate);
   els.sendUnmentioned.addEventListener("change", updateCostEstimate);
@@ -72,6 +99,11 @@ function wireEvents() {
   els.refreshBalance.addEventListener("click", loadBalance);
   els.generate.addEventListener("click", submitGeneration);
   els.pollNow.addEventListener("click", () => pollTask(true));
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && !els.historyModal.hidden) {
+      closeHistory(event);
+    }
+  });
 }
 
 async function checkHealth() {
@@ -118,6 +150,116 @@ async function loadTosStatus() {
   } catch (error) {
     state.tos = { configured: false, message: error.message };
   }
+}
+
+async function openHistory() {
+  els.historyModal.hidden = false;
+  await loadHistory();
+}
+
+function closeHistory(event) {
+  event?.preventDefault?.();
+  event?.stopPropagation?.();
+  els.historyModal.hidden = true;
+}
+
+async function loadHistory() {
+  els.historyList.innerHTML = `<div class="history-item"><p class="history-item-prompt">正在读取历史任务...</p></div>`;
+  try {
+    const data = await getJson("/api/history");
+    renderHistory(data.data || []);
+  } catch (error) {
+    els.historyList.innerHTML = `<div class="history-item"><p class="history-item-prompt">${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function renderHistory(tasks) {
+  els.historyList.innerHTML = "";
+  if (!tasks.length) {
+    els.historyList.innerHTML = `<div class="history-item"><p class="history-item-prompt">还没有历史任务。提交一次生成后会自动记录。</p></div>`;
+    return;
+  }
+
+  for (const task of tasks) {
+    const item = document.createElement("article");
+    item.className = "history-item";
+    const status = task.status || task.result?.status || "unknown";
+    const prompt = task.prompt || task.request?.content?.find?.(entry => entry.type === "text")?.text || "";
+    item.innerHTML = `
+      <div class="history-item-head">
+        <div class="history-item-title">
+          <strong>${escapeHtml(task.id)}</strong>
+          <span>${escapeHtml(task.model || task.result?.model || "-")} · ${escapeHtml(formatDateTime(task.updatedAt || task.createdAt))}</span>
+        </div>
+        <span class="history-badge ${escapeHtml(status)}">${escapeHtml(status)}</span>
+      </div>
+      <p class="history-item-prompt">${escapeHtml(prompt || "无 prompt 记录")}</p>
+    `;
+
+    const actions = document.createElement("div");
+    actions.className = "history-item-actions";
+    const restore = document.createElement("button");
+    restore.type = "button";
+    restore.className = "small-button";
+    restore.textContent = "查看/继续轮询";
+    restore.addEventListener("click", () => restoreTask(task.id));
+    actions.append(restore);
+
+    const videoUrl = task.result?.content?.video_url || task.output?.video_url || "";
+    if (videoUrl) {
+      const open = document.createElement("a");
+      open.href = videoUrl;
+      open.target = "_blank";
+      open.rel = "noreferrer";
+      open.textContent = "打开视频";
+      open.className = "small-button";
+      actions.append(open);
+    }
+
+    item.append(actions);
+    els.historyList.append(item);
+  }
+}
+
+async function importHistoryTask() {
+  const taskId = els.historyTaskId.value.trim();
+  if (!taskId) {
+    setError("请输入任务 ID。");
+    return;
+  }
+
+  els.historyImport.disabled = true;
+  els.historyImport.textContent = "恢复中...";
+  try {
+    const data = await postJson("/api/history/import", { taskId });
+    renderTask(data.result || {});
+    state.activeTaskId = data.result?.id || taskId;
+    els.pollNow.disabled = false;
+    if (!terminalStatuses().has(data.result?.status)) {
+      startPolling();
+    }
+    await loadHistory();
+    setMessage("任务已恢复。");
+  } catch (error) {
+    setError(error.message);
+  } finally {
+    els.historyImport.disabled = false;
+    els.historyImport.textContent = "恢复";
+  }
+}
+
+async function restoreTask(taskId) {
+  closeHistory();
+  state.activeTaskId = taskId;
+  els.pollNow.disabled = false;
+  const task = await pollTask(true);
+  if (!terminalStatuses().has(task?.status)) {
+    startPolling();
+  }
+}
+
+function terminalStatuses() {
+  return new Set(["succeeded", "failed", "expired", "cancelled"]);
 }
 
 async function loadModels() {
@@ -270,7 +412,7 @@ async function uploadVideoReference(file, reference) {
     reference.local = false;
     reference.needsWebUrl = false;
     reference.uploadStatus = "done";
-    reference.uploadMessage = "已上传 TOS，任务结束或到期后自动清理。";
+    reference.uploadMessage = "已上传 TOS 公开临时对象，任务结束或到期后自动清理。";
     setMessage(`${reference.handle} 已上传到 TOS，可以直接生成。`);
   } catch (error) {
     reference.uploadStatus = "error";
@@ -435,6 +577,11 @@ function updateScenarioHint() {
 
   if (usesFrameMode && usesReferenceMode) {
     setMessage("提示：官方文档说明首尾帧模式和多模态参考模式互斥，混用可能被 API 拒绝。");
+    return;
+  }
+
+  if (shouldOmitResolutionForFastR2v(els.modelSelect.value, getSelectedReferences())) {
+    setMessage("提示：Fast 模型在参考素材模式下会自动不传 resolution，避免 r2v 参数校验失败。");
   }
 }
 
@@ -479,8 +626,11 @@ function updateCostEstimate() {
 
 function getSelectedReferences() {
   const prompt = els.prompt.value.trim().toLowerCase();
-  if (els.sendUnmentioned.checked || !prompt) {
+  if (els.sendUnmentioned.checked) {
     return state.references;
+  }
+  if (!prompt) {
+    return [];
   }
 
   return state.references.filter(reference => prompt.includes(`@${String(reference.handle || "").toLowerCase()}`));
@@ -575,6 +725,9 @@ function buildClientPayload() {
   if (!prompt && !state.references.length) {
     throw new Error("请输入 prompt 或添加参考素材。");
   }
+  if (!prompt && state.references.length && !els.sendUnmentioned.checked) {
+    throw new Error("没有 prompt 时，请勾选“发送全部已添加素材”，或在 prompt 中写 @图片1 / @视频1。");
+  }
 
   const selectedReferences = getSelectedReferences();
   for (const reference of selectedReferences) {
@@ -600,8 +753,8 @@ function buildClientPayload() {
       tosBucket: reference.tosBucket || ""
     })),
     params: {
-      service_tier: els.serviceTier.value,
-      resolution: els.resolution.value,
+      service_tier: els.serviceTier.value || "",
+      resolution: shouldOmitResolutionForFastR2v(model, selectedReferences) ? "" : els.resolution.value,
       ratio: els.ratio.value,
       duration: numberOrBlank(els.duration.value),
       frames: numberOrBlank(els.frames.value),
@@ -613,6 +766,17 @@ function buildClientPayload() {
       use_web_search: els.webSearch.checked
     }
   };
+}
+
+function shouldOmitResolutionForFastR2v(model, references) {
+  if (!/doubao-seedance-2-0-fast/i.test(String(model || ""))) {
+    return false;
+  }
+
+  return references.some(reference => {
+    const role = String(reference.role || "");
+    return role.startsWith("reference_") || reference.kind === "video" || reference.kind === "audio";
+  });
 }
 
 function startPolling() {
@@ -634,22 +798,26 @@ async function pollTask(manual) {
     const task = data.result || {};
     renderTask(task);
 
-    if (["succeeded", "failed", "expired", "cancelled"].includes(task.status)) {
+    if (terminalStatuses().has(task.status)) {
       clearPolling();
     }
+    return task;
   } catch (error) {
     setError(error.message);
+    return null;
   }
 }
 
 function renderTask(task) {
   const status = task.status || "unknown";
+  state.currentStatus = status;
   const content = task.content || {};
   const videoUrl = content.video_url || task.video_url || "";
   const lastFrameUrl = content.last_frame_url || "";
 
   els.jobSubtitle.textContent = task.id ? `任务 ${task.id} · ${status}` : `任务状态：${status}`;
   els.taskMeta.innerHTML = "";
+  updateProgress(task);
   addMeta("状态", status);
   addMeta("模型", task.model || els.modelSelect.value || "-");
   addMeta("比例", task.ratio || "-");
@@ -659,7 +827,7 @@ function renderTask(task) {
   updateActualCost(task);
 
   if (task.error) {
-    addMeta("错误", task.error.message || task.error.code || JSON.stringify(task.error));
+    addMeta("错误", normalizeUserFacingError(task.error.message || task.error.code || JSON.stringify(task.error)));
   }
 
   els.downloadActions.innerHTML = "";
@@ -678,10 +846,74 @@ function renderTask(task) {
   if (status === "succeeded") {
     setMessage("生成完成，可以预览和下载。");
   } else if (status === "failed" || status === "expired" || status === "cancelled") {
-    setError(`任务结束：${status}`);
+    setError(task.error?.message || `任务结束：${status}`);
   } else {
     setMessage(`任务状态：${status}。`);
   }
+}
+
+function updateProgress(task) {
+  const progress = computeProgress(task);
+  els.progressLabel.textContent = progress.label;
+  els.progressValue.textContent = `${progress.percent}%`;
+  els.progressNote.textContent = progress.note;
+  els.progressBar.style.width = `${progress.percent}%`;
+  els.progressBar.classList.toggle("failed", ["failed", "expired", "cancelled"].includes(task.status));
+  els.progressBar.classList.toggle("waiting", ["queued", "running"].includes(task.status));
+}
+
+function computeProgress(task) {
+  const status = task.status || "unknown";
+  const direct = firstNumber(task.progress, task.progress_percent, task.percent, task.process);
+  if (direct != null) {
+    return {
+      percent: clamp(Math.round(direct > 1 ? direct : direct * 100), 0, 100),
+      label: "进度",
+      note: "来自接口返回的进度字段。"
+    };
+  }
+
+  if (status === "succeeded") {
+    return { percent: 100, label: "进度", note: "任务已完成。" };
+  }
+  if (["failed", "expired", "cancelled"].includes(status)) {
+    return { percent: 100, label: "进度", note: `任务已结束：${status}。` };
+  }
+  if (status === "queued") {
+    return { percent: 8, label: "估算进度", note: "官方查询接口未返回百分比；当前为排队状态估算。" };
+  }
+  if (status === "running") {
+    const createdAt = getTaskStartMillis(task);
+    const duration = Number(task.duration || numberOrBlank(els.duration.value) || 6);
+    const expectedSeconds = clamp(70 + duration * 35, 140, 780);
+    const elapsedSeconds = createdAt ? (Date.now() - createdAt) / 1000 : 0;
+    const percent = clamp(Math.round(12 + (elapsedSeconds / expectedSeconds) * 83), 12, 95);
+    return {
+      percent,
+      label: "估算进度",
+      note: "官方 API 当前未返回官网同款百分比；这里按运行时长估算，完成后会变为 100%。"
+    };
+  }
+
+  return { percent: 0, label: "进度", note: "等待提交任务。" };
+}
+
+function getTaskStartMillis(task) {
+  if (task.created_at) {
+    return Number(task.created_at) * 1000;
+  }
+  const created = Date.parse(task.createdAt || "");
+  return Number.isNaN(created) ? 0 : created;
+}
+
+function firstNumber(...values) {
+  for (const value of values) {
+    const number = Number(value);
+    if (Number.isFinite(number)) {
+      return number;
+    }
+  }
+  return null;
 }
 
 function updateActualCost(task) {
@@ -801,6 +1033,10 @@ function formatMoney(value) {
   return value >= 10 ? value.toFixed(2) : value.toFixed(3).replace(/0$/, "");
 }
 
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function formatDateTime(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -820,8 +1056,20 @@ function setMessage(message) {
 }
 
 function setError(message) {
-  els.formMessage.textContent = message;
+  els.formMessage.textContent = normalizeUserFacingError(message);
   els.formMessage.classList.add("error");
+}
+
+function normalizeUserFacingError(message) {
+  const text = String(message || "");
+  if (/input video may contain real person/i.test(text)) {
+    return [
+      "参考视频被 Ark 安全策略拦截：输入视频可能包含真人。",
+      "可以换成不含真人的视频；如果必须使用真人，请先在火山方舟“真人人像/可信素材库”完成授权和一致性校验，再使用对应的授权素材 Asset ID。",
+      `Ark 原始错误：${text}`
+    ].join("\n");
+  }
+  return text;
 }
 
 function escapeHtml(value) {

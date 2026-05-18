@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { extname, join, normalize, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -9,6 +9,8 @@ import { TosClient } from "@volcengine/tos-sdk";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const publicDir = resolve(__dirname, "public");
+const localDataDir = resolve(__dirname, "local_data");
+const historyPath = resolve(localDataDir, "tasks.json");
 const arkBaseUrl = "https://ark.cn-beijing.volces.com/api/v3";
 const port = Number(process.env.PORT || 5173);
 const maxBodyBytes = 90 * 1024 * 1024;
@@ -64,6 +66,14 @@ const server = createServer(async (request, response) => {
 
     if (url.pathname === "/api/tos/delete" && request.method === "POST") {
       return await handleTosDelete(request, response);
+    }
+
+    if (url.pathname === "/api/history" && request.method === "GET") {
+      return await handleHistoryList(response);
+    }
+
+    if (url.pathname === "/api/history/import" && request.method === "POST") {
+      return await handleHistoryImport(request, response);
     }
 
     if (url.pathname === "/api/generate" && request.method === "POST") {
@@ -186,6 +196,17 @@ async function handleGenerate(request, response) {
   });
   const taskId = result.id || result.task_id || result.data?.id;
   registerTaskTosCleanup(taskId, selectedReferences);
+  await upsertTaskHistory({
+    id: taskId,
+    status: result.status || "queued",
+    model: payload.model,
+    prompt: extractPrompt(payload),
+    request: summarizeRequest(payload),
+    result,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    tosKeys: selectedReferences.map(reference => String(reference.tosKey || reference.tos?.key || "").trim()).filter(Boolean)
+  });
 
   return sendJson(response, 200, {
     request: summarizeRequest(payload),
@@ -197,9 +218,34 @@ async function handleTask(taskId, response) {
   const result = await callArk(`/contents/generations/tasks/${encodeURIComponent(taskId)}`, {
     method: "GET"
   });
+  await updateTaskHistoryFromResult(result);
   if (terminalTaskStatuses.has(result.status)) {
     cleanupTaskTosObjects(taskId, `task-${result.status}`).catch(error => console.warn(error));
   }
+  return sendJson(response, 200, { result });
+}
+
+async function handleHistoryList(response) {
+  const history = await readTaskHistory();
+  return sendJson(response, 200, {
+    data: history.tasks
+      .slice()
+      .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+      .slice(0, 100)
+  });
+}
+
+async function handleHistoryImport(request, response) {
+  const body = await readJsonBody(request);
+  const taskId = String(body.taskId || "").trim();
+  if (!taskId) {
+    throw new HttpError(400, "请输入任务 ID。");
+  }
+
+  const result = await callArk(`/contents/generations/tasks/${encodeURIComponent(taskId)}`, {
+    method: "GET"
+  });
+  await updateTaskHistoryFromResult(result, { imported: true });
   return sendJson(response, 200, { result });
 }
 
@@ -232,20 +278,16 @@ async function handleTosUploadVideo(request, response) {
     body: buffer,
     contentType,
     contentLength: buffer.length,
+    acl: "public-read",
     meta: {
       source: "ark-video-studio",
       original: fileName
     }
   });
 
-  const expires = config.signedUrlExpiresSeconds;
-  const signedUrl = client.getPreSignedUrl({
-    method: "GET",
-    bucket: config.bucket,
-    key,
-    expires,
-    response: { contentType }
-  });
+  const publicUrl = buildTosPublicUrl(config.bucket, config.endpoint, key);
+  await validateDownloadUrl(publicUrl);
+
   const cleanupAt = registerManagedTosObject({
     bucket: config.bucket,
     key,
@@ -254,11 +296,11 @@ async function handleTosUploadVideo(request, response) {
   });
 
   return sendJson(response, 200, {
-    url: signedUrl,
+    url: publicUrl,
     key,
     bucket: config.bucket,
     size: buffer.length,
-    expiresAt: new Date(Date.now() + expires * 1000).toISOString(),
+    expiresAt: null,
     cleanupAt: new Date(cleanupAt).toISOString()
   });
 }
@@ -311,6 +353,7 @@ function buildArkGenerationPayload(body) {
 
   const prompt = String(body.prompt || "").trim();
   const references = Array.isArray(body.references) ? body.references : [];
+  const selectedReferences = selectReferences(prompt, references, body.sendUnmentionedReferences);
   if (!prompt && references.length === 0 && !body.draftTaskId) {
     throw new HttpError(400, "Prompt or reference material is required");
   }
@@ -320,7 +363,7 @@ function buildArkGenerationPayload(body) {
     content.push({ type: "text", text: prompt });
   }
 
-  for (const reference of selectReferences(prompt, references, body.sendUnmentionedReferences)) {
+  for (const reference of selectedReferences) {
     const type = reference.kind === "video" ? "video_url" : reference.kind === "audio" ? "audio_url" : "image_url";
     const url = String(reference.url || "").trim();
     if (!url) {
@@ -361,6 +404,9 @@ function buildArkGenerationPayload(body) {
       draft_task: { id: String(body.draftTaskId).trim() }
     });
   }
+  if (content.length === 0) {
+    throw new HttpError(400, "Prompt or selected reference material is required");
+  }
 
   const params = body.params && typeof body.params === "object" ? body.params : {};
   const payload = {
@@ -370,7 +416,9 @@ function buildArkGenerationPayload(body) {
 
   copyString(params, payload, "callback_url");
   copyString(params, payload, "service_tier");
-  copyString(params, payload, "resolution");
+  if (!shouldOmitResolutionForFastR2v(body.model, selectedReferences)) {
+    copyString(params, payload, "resolution");
+  }
   copyString(params, payload, "ratio");
   copyString(params, payload, "safety_identifier");
   copyBoolean(params, payload, "return_last_frame");
@@ -394,14 +442,28 @@ function buildArkGenerationPayload(body) {
 }
 
 function selectReferences(prompt, references, sendUnmentioned) {
-  if (sendUnmentioned || !prompt.trim()) {
+  if (sendUnmentioned) {
     return references;
+  }
+  if (!prompt.trim()) {
+    return [];
   }
 
   const normalizedPrompt = prompt.toLowerCase();
   return references.filter(reference => {
     const handle = String(reference.handle || "").toLowerCase();
     return handle && normalizedPrompt.includes(`@${handle}`);
+  });
+}
+
+function shouldOmitResolutionForFastR2v(model, references) {
+  if (!/doubao-seedance-2-0-fast/i.test(String(model || ""))) {
+    return false;
+  }
+
+  return references.some(reference => {
+    const role = String(reference.role || "");
+    return role.startsWith("reference_") || reference.kind === "video" || reference.kind === "audio";
   });
 }
 
@@ -487,6 +549,32 @@ function buildTosObjectKey(fileName) {
   return `${config.prefix}/${yyyy}${mm}${dd}/${Date.now()}-${randomUUID()}-${fileName}`;
 }
 
+function buildTosPublicUrl(bucket, endpoint, key) {
+  const encodedKey = key.split("/").map(part => encodeURIComponent(part)).join("/");
+  return `https://${bucket}.${endpoint}/${encodedKey}`;
+}
+
+async function validateDownloadUrl(url) {
+  try {
+    const response = await fetch(url, { method: "HEAD" });
+    if (response.ok) {
+      return;
+    }
+    throw new Error(`HEAD ${response.status}`);
+  } catch (headError) {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: { Range: "bytes=0-0" }
+    });
+    if (!response.ok && response.status !== 206) {
+      throw new HttpError(
+        502,
+        `TOS 对象已上传，但公开下载校验失败（${headError.message}; GET ${response.status}）。请确认桶允许对象 public-read，或为前缀配置公开读策略。`
+      );
+    }
+  }
+}
+
 function registerTaskTosCleanup(taskId, references) {
   if (!taskId) {
     return;
@@ -508,6 +596,80 @@ function registerTaskTosCleanup(taskId, references) {
     }
   }
   taskTosObjects.set(taskId, Array.from(current));
+}
+
+async function readTaskHistory() {
+  try {
+    const raw = await readFile(historyPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      tasks: Array.isArray(parsed.tasks) ? parsed.tasks : []
+    };
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return { tasks: [] };
+    }
+    throw error;
+  }
+}
+
+async function writeTaskHistory(history) {
+  await mkdir(localDataDir, { recursive: true });
+  await writeFile(historyPath, JSON.stringify(history, null, 2), "utf8");
+}
+
+async function upsertTaskHistory(record) {
+  if (!record?.id) {
+    return;
+  }
+
+  const history = await readTaskHistory();
+  const index = history.tasks.findIndex(task => task.id === record.id);
+  const existing = index >= 0 ? history.tasks[index] : {};
+  const cleaned = Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined));
+  const next = {
+    ...existing,
+    ...cleaned,
+    id: record.id,
+    createdAt: existing.createdAt || record.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  if (index >= 0) {
+    history.tasks[index] = next;
+  } else {
+    history.tasks.push(next);
+  }
+
+  history.tasks = history.tasks
+    .filter(task => task.id)
+    .sort((a, b) => new Date(b.updatedAt || b.createdAt || 0) - new Date(a.updatedAt || a.createdAt || 0))
+    .slice(0, 200);
+  await writeTaskHistory(history);
+}
+
+async function updateTaskHistoryFromResult(result, extra = {}) {
+  if (!result?.id) {
+    return;
+  }
+
+  await upsertTaskHistory({
+    id: result.id,
+    status: result.status || "unknown",
+    model: result.model,
+    prompt: extra.prompt,
+    result,
+    output: result.content || null,
+    usage: result.usage || null,
+    createdAt: result.created_at ? new Date(result.created_at * 1000).toISOString() : undefined,
+    updatedAt: result.updated_at ? new Date(result.updated_at * 1000).toISOString() : new Date().toISOString(),
+    imported: extra.imported || undefined
+  });
+}
+
+function extractPrompt(payload) {
+  const textItem = payload?.content?.find(item => item.type === "text");
+  return textItem?.text || "";
 }
 
 function registerManagedTosObject(record) {
@@ -611,11 +773,24 @@ async function callArk(pathname, options) {
 }
 
 function extractArkMessage(parsed, fallback) {
-  return parsed?.error?.message
+  const message = parsed?.error?.message
     || parsed?.message
     || parsed?.ResponseMetadata?.Error?.Message
     || fallback
     || "Ark API request failed";
+  return normalizeArkMessage(message);
+}
+
+function normalizeArkMessage(message) {
+  const text = String(message || "");
+  if (/input video may contain real person/i.test(text)) {
+    return [
+      "参考视频被 Ark 安全策略拦截：输入视频可能包含真人。",
+      "处理方式：请改用不含真人的视频；如果必须使用真人，请先在火山方舟“真人人像/可信素材库”完成本人授权和一致性校验，拿到 Asset ID 后使用授权素材。普通本地视频、TOS 公网链接或未授权真人视频会被拒绝。",
+      `Ark 原始错误：${text}`
+    ].join("\n");
+  }
+  return text;
 }
 
 function tryParseJson(text) {

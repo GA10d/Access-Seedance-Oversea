@@ -14,6 +14,7 @@
           <h1>Ark Video Studio</h1>
         </div>
         <div class="topbar-actions">
+          <button id="history-button" class="history-button" type="button">历史任务</button>
           <span id="api-status" class="status-pill">检查 API Key...</span>
           <button id="refresh-models" class="icon-button" title="刷新模型列表" aria-label="刷新模型列表">↻</button>
         </div>
@@ -29,6 +30,7 @@
             <label class="field">
               <span>服务等级</span>
               <select id="service-tier">
+                <option value="">自动（不传）</option>
                 <option value="default">default 在线</option>
                 <option value="flex">flex 离线</option>
               </select>
@@ -87,6 +89,7 @@
               <label class="field">
                 <span>分辨率</span>
                 <select id="resolution">
+                  <option value="">自动（不传）</option>
                   <option value="720p">720p</option>
                   <option value="480p">480p</option>
                   <option value="1080p">1080p</option>
@@ -127,13 +130,13 @@
               <label><input id="watermark" type="checkbox"> 添加 AI 水印</label>
               <label><input id="last-frame" type="checkbox"> 返回尾帧</label>
               <label><input id="web-search" type="checkbox"> 允许联网搜索工具</label>
-              <label><input id="send-unmentioned" type="checkbox" checked> 发送全部已添加素材</label>
+              <label><input id="send-unmentioned" type="checkbox"> 发送全部已添加素材</label>
             </div>
           </section>
 
           <section class="compliance-note">
             <h2>素材规则</h2>
-            <p>Seedance 2.0 系列不支持直接上传含真人人脸的参考图/视频。请使用已授权素材、预置虚拟人像或受信模型产物。</p>
+            <p>Seedance 2.0 系列会拦截未授权真人参考图/视频。普通本地视频、TOS 公网链接不等于真人授权；需要真人时，请先在火山方舟真人人像/可信素材库完成授权和一致性校验，再使用对应 Asset ID 授权素材。</p>
           </section>
 
           <section class="cost-panel">
@@ -174,6 +177,17 @@
             <button id="poll-now" class="small-button" type="button" disabled>刷新状态</button>
           </div>
 
+          <div class="progress-block">
+            <div class="progress-head">
+              <span id="progress-label">进度</span>
+              <strong id="progress-value">0%</strong>
+            </div>
+            <div class="progress-track">
+              <div id="progress-bar" class="progress-bar"></div>
+            </div>
+            <p id="progress-note">等待提交任务。</p>
+          </div>
+
           <div class="stage">
             <video id="result-video" controls playsinline></video>
             <div id="empty-state" class="empty-state">
@@ -187,6 +201,23 @@
           <pre id="request-preview" class="request-preview"></pre>
         </section>
       </main>
+    </div>
+
+    <div id="history-modal" class="modal-backdrop" hidden>
+      <section class="history-modal" aria-label="历史任务">
+        <div class="modal-head">
+          <div>
+            <h2>历史任务</h2>
+            <p>本地记录保存在 local_data/tasks.json。</p>
+          </div>
+          <button id="history-close" class="icon-button" type="button" aria-label="关闭历史任务">×</button>
+        </div>
+        <div class="history-import">
+          <input id="history-task-id" placeholder="输入 cgt-... 任务 ID 恢复查询">
+          <button id="history-import" class="small-button" type="button">恢复</button>
+        </div>
+        <div id="history-list" class="history-list"></div>
+      </section>
     </div>
 
     <script src="/app.js" type="module"></script>
